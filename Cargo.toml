@@ -12,7 +12,12 @@ tracing = "*"
 winit = "*"
 glutin = "*"
 glium = "*"
-fork = "*"
-ipc-channel = "*"
 serde = { version = "*", features = ["derive"] }
 serde_derive = "*"
+
+[target.'cfg(not(windows))'.dependencies]
+ipc-channel = "*"
+fork = "*"
+
+[target.'cfg(windows)'.dependencies]
+ipc-channel = { version = "*", features = ["force-inprocess"] }

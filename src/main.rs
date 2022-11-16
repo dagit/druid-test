@@ -26,21 +26,23 @@ use druid::{
     Handled, LocalizedString, Menu, MenuItem, Target, WindowDesc, WindowHandle, WindowId,
 };
 use glium::implement_vertex;
+use ipc_channel::ipc::{self, IpcOneShotServer, IpcReceiver, IpcSender};
 use tracing::info;
-use ipc_channel::ipc::{self, IpcOneShotServer, IpcSender, IpcReceiver};
 
+#[cfg(not(windows))]
 use fork::*;
 use serde_derive::{Deserialize, Serialize};
 
+#[cfg(not(windows))]
 pub fn double_fork() -> Result<Fork, i32> {
     match fork() {
-        Ok(Fork::Parent(_)) => return Ok(Fork::Parent(0)),
+        Ok(Fork::Parent(_)) => Ok(Fork::Parent(0)),
         Ok(Fork::Child) => match fork() {
             Ok(Fork::Parent(_)) => std::process::exit(0),
-            Ok(Fork::Child) => return Ok(Fork::Child),
-            err => return err,
+            Ok(Fork::Child) => Ok(Fork::Child),
+            err => err,
         },
-        err => return err,
+        err => err,
     }
 }
 
@@ -59,43 +61,38 @@ struct State {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Data, Eq, PartialEq)]
-enum Message {
+pub enum Message {
     Text(String),
 }
 
-pub fn main() {
-    let (server, server_name) = IpcOneShotServer::new().unwrap();
-    println!("Server name: {}", server_name);
+pub fn parent(server: IpcOneShotServer<(IpcSender<Message>, IpcReceiver<Message>)>) {
+    println!("parent");
+    use glium::{glutin, Surface};
 
-    match double_fork() {
-        Ok(Fork::Parent(_)) => {
-            println!("parent");
-            use glium::{glutin, Surface};
+    let (_, (tx1, rx2)): (_, (IpcSender<Message>, IpcReceiver<Message>)) = server.accept().unwrap();
+    tx1.send(Message::Text("Hello".to_owned())).unwrap();
+    let data = rx2.recv().unwrap();
+    assert_eq!(data, Message::Text("Second".to_owned()));
+    tx1.send(Message::Text("Third".to_owned())).unwrap();
 
-            let (_, (tx1, rx2)): (_, (IpcSender<Message>, IpcReceiver<Message>)) = server.accept().unwrap();
-            tx1.send(Message::Text("Hello".to_owned())).unwrap();
-            let data = rx2.recv().unwrap();
-            assert_eq!(data, Message::Text("Second".to_owned()));
-            tx1.send(Message::Text("Third".to_owned())).unwrap();
+    let event_loop = glutin::event_loop::EventLoop::new();
+    let wb = glutin::window::WindowBuilder::new();
+    let cb = glutin::ContextBuilder::new();
+    let display = glium::Display::new(wb, cb, &event_loop).unwrap();
 
-            let event_loop = glutin::event_loop::EventLoop::new();
-            let wb = glutin::window::WindowBuilder::new();
-            let cb = glutin::ContextBuilder::new();
-            let display = glium::Display::new(wb, cb, &event_loop).unwrap();
-
-            let vertex1 = Vertex {
-                position: [-0.5, -0.5],
-            };
-            let vertex2 = Vertex {
-                position: [0.0, 0.5],
-            };
-            let vertex3 = Vertex {
-                position: [0.5, -0.25],
-            };
-            let shape = vec![vertex1, vertex2, vertex3];
-            let vertex_buffer = glium::VertexBuffer::new(&display, &shape).unwrap();
-            let indices = glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList);
-            let vertex_shader_src = r#"
+    let vertex1 = Vertex {
+        position: [-0.5, -0.5],
+    };
+    let vertex2 = Vertex {
+        position: [0.0, 0.5],
+    };
+    let vertex3 = Vertex {
+        position: [0.5, -0.25],
+    };
+    let shape = vec![vertex1, vertex2, vertex3];
+    let vertex_buffer = glium::VertexBuffer::new(&display, &shape).unwrap();
+    let indices = glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList);
+    let vertex_shader_src = r#"
                   #version 140
 
                   in vec2 position;
@@ -105,78 +102,100 @@ pub fn main() {
                   }
                   "#;
 
-            let fragment_shader_src = r#"
+    let fragment_shader_src = r#"
                   #version 140
                   out vec4 color;
                   void main() {
                       color = vec4(1.0, 0.0, 0.0, 1.0);
                   }
                   "#;
-            let program =
-                glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src, None)
-                    .unwrap();
+    let program =
+        glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src, None)
+            .unwrap();
 
-            event_loop.run(move |ev, _, control_flow| {
-                let next_frame_time =
-                    std::time::Instant::now() + std::time::Duration::from_nanos(16_666_667);
+    event_loop.run(move |ev, _, control_flow| {
+        let next_frame_time =
+            std::time::Instant::now() + std::time::Duration::from_nanos(16_666_667);
 
-                *control_flow = glutin::event_loop::ControlFlow::WaitUntil(next_frame_time);
-                match ev {
-                    glutin::event::Event::WindowEvent { event, .. } => match event {
-                        glutin::event::WindowEvent::CloseRequested => {
-                            *control_flow = glutin::event_loop::ControlFlow::Exit;
-                            return;
-                        }
-                        _ => return,
-                    },
-                    glutin::event::Event::NewEvents(cause) => match cause {
-                        glutin::event::StartCause::ResumeTimeReached { .. } => (),
-                        glutin::event::StartCause::Init => (),
-                        _ => return,
-                    },
-                    _ => (),
+        *control_flow = glutin::event_loop::ControlFlow::WaitUntil(next_frame_time);
+        match ev {
+            glutin::event::Event::WindowEvent { event, .. } => match event {
+                glutin::event::WindowEvent::CloseRequested => {
+                    *control_flow = glutin::event_loop::ControlFlow::Exit;
+                    return;
                 }
-                let mut target = display.draw();
-                target.clear_color(0.0, 0.0, 1.0, 1.0);
-                target
-                    .draw(
-                        &vertex_buffer,
-                        &indices,
-                        &program,
-                        &glium::uniforms::EmptyUniforms,
-                        &Default::default(),
-                    )
-                    .unwrap();
-                target.finish().unwrap();
-            });
+                _ => return,
+            },
+            glutin::event::Event::NewEvents(cause) => match cause {
+                glutin::event::StartCause::ResumeTimeReached { .. } => (),
+                glutin::event::StartCause::Init => (),
+                _ => return,
+            },
+            _ => (),
+        }
+        let mut target = display.draw();
+        target.clear_color(0.0, 0.0, 1.0, 1.0);
+        target
+            .draw(
+                &vertex_buffer,
+                indices,
+                &program,
+                &glium::uniforms::EmptyUniforms,
+                &Default::default(),
+            )
+            .unwrap();
+        target.finish().unwrap();
+    });
+}
+
+pub fn child(server_name: String) {
+    //let tx: IpcSender<Vec<u8>> = IpcSender::connect(server_name).unwrap();
+    let (tx1, rx1): (IpcSender<Message>, IpcReceiver<Message>) = ipc::channel().unwrap();
+    let (tx2, rx2): (IpcSender<Message>, IpcReceiver<Message>) = ipc::channel().unwrap();
+    let tx0 = IpcSender::connect(server_name).unwrap();
+    tx0.send((tx1, rx2)).unwrap();
+
+    let data = rx1.recv().unwrap();
+    assert_eq!(data, Message::Text("Hello".to_owned()));
+
+    tx2.send(Message::Text("Second".to_owned())).unwrap();
+    let data = rx1.recv().unwrap();
+    assert_eq!(data, Message::Text("Third".to_owned()));
+
+    let main_window = WindowDesc::new(ui_builder()).menu(make_menu).title(
+        LocalizedString::new("multiwin-demo-window-title").with_placeholder("Many Windows!"),
+    );
+    AppLauncher::with_window(main_window)
+        .delegate(Delegate {
+            windows: Vec::new(),
+        })
+        .log_to_console()
+        .launch(State::default())
+        .expect("launch failed");
+}
+
+pub fn main() {
+    let (server, server_name) = IpcOneShotServer::new().unwrap();
+    println!("Server name: {}", server_name);
+
+    #[cfg(not(windows))]
+    match double_fork() {
+        Ok(Fork::Parent(_)) => {
+            parent(server);
         }
         Ok(Fork::Child) => {
-            //let tx: IpcSender<Vec<u8>> = IpcSender::connect(server_name).unwrap();
-            let (tx1, rx1): (IpcSender<Message>, IpcReceiver<Message>) = ipc::channel().unwrap();
-            let (tx2, rx2): (IpcSender<Message>, IpcReceiver<Message>) = ipc::channel().unwrap();
-            let tx0 = IpcSender::connect(server_name).unwrap();
-            tx0.send((tx1,rx2)).unwrap();
-
-            let data = rx1.recv().unwrap();
-            assert_eq!(data, Message::Text("Hello".to_owned()));
-
-            tx2.send(Message::Text("Second".to_owned())).unwrap();
-            let data = rx1.recv().unwrap();
-            assert_eq!(data, Message::Text("Third".to_owned()));
-
-            let main_window = WindowDesc::new(ui_builder()).menu(make_menu).title(
-                LocalizedString::new("multiwin-demo-window-title")
-                    .with_placeholder("Many Windows!"),
-            );
-            AppLauncher::with_window(main_window)
-                .delegate(Delegate {
-                    windows: Vec::new(),
-                })
-                .log_to_console()
-                .launch(State::default())
-                .expect("launch failed");
+            child(server_name);
         }
         Err(_) => println!("Fork failed"),
+    }
+    #[cfg(windows)]
+    {
+        let child_thread = std::thread::spawn(move || {
+            child(server_name);
+        });
+        parent(server);
+
+        child_thread.join().unwrap();
     }
 }
 
